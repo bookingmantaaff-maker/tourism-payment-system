@@ -12,7 +12,7 @@ if not firebase_admin._apps:
     firebase_config = st.secrets["firebase"]
     cred_dict = {
         "type": firebase_config["type"],
-        "project_id": firebase_config["project_id"],  # Fixed from "tourism-payment-sys"
+        "project_id": firebase_config["project_id"],
         "private_key_id": firebase_config["private_key_id"],
         "private_key": firebase_config["private_key"],
         "client_email": firebase_config["client_email"],
@@ -76,9 +76,9 @@ def create_user_with_email_and_password(email, password):
 # Authentication pages
 def login():
     st.subheader("Login")
-    email = st.text_input("Email")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
+    email = st.text_input("Email", key="login_email")
+    password = st.text_input("Password", type="password", key="login_password")
+    if st.button("Login", key="login_button"):
         try:
             user_data = sign_in_with_email_and_password(email, password)
             st.session_state.user = {
@@ -94,10 +94,10 @@ def login():
 
 def signup():
     st.subheader("Sign Up")
-    email = st.text_input("Email")
-    password = st.text_input("Password", type="password")
-    role = st.selectbox("Role", ["user", "admin"])  # Restrict admin in production
-    if st.button("Sign Up"):
+    email = st.text_input("Email", key="signup_email")
+    password = st.text_input("Password", type="password", key="signup_password")
+    role = st.selectbox("Role", ["user", "admin"], key="signup_role")  # Restrict admin in production
+    if st.button("Sign Up", key="signup_button"):
         try:
             user = create_user_with_email_and_password(email, password)
             db.reference("users").child(user.uid).set({"email": email, "role": role})
