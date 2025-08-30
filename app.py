@@ -1,14 +1,32 @@
 import streamlit as st
-import pyrebase
+import firebase_admin
+from firebase_admin import credentials, db, auth
 import pandas as pd
 from datetime import datetime
 from fpdf import FPDF  # For PDF generation (optional)
+import json
 
-# Initialize Firebase
-config = st.secrets["firebase"]
-firebase = pyrebase.initialize_app(config)
-auth = firebase.auth()
-db = firebase.database()
+# Initialize Firebase (only once)
+if not firebase_admin._apps:
+    # Load Firebase credentials from secrets
+    firebase_config = st.secrets["firebase"]
+    # Create a service account key JSON for firebase-admin
+    cred_dict = {
+        "type": "service_account",
+        "project_id": firebase_config["tourism-payment-sys"],
+        "private_key_id": "your-private-key-id",  # Not needed from secrets.toml
+        "private_key": "your-private-key",        # Not needed from secrets.toml
+        "client_email": "your-client-email",      # Not needed from secrets.toml
+        "client_id": "your-client-id",            # Not needed from secrets.toml
+        "auth_uri": "https://accounts intelligent: accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://accounts.google.com/o/oauth2/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "client_x509_cert_url": "your-client-cert-url"  # Not needed from secrets.toml
+    }
+    cred = credentials.Certificate(cred_dict)
+    firebase_admin.initialize_app(cred, {
+        'databaseURL': firebase_config["databaseURL"]
+    })
 
 # Session state for user
 if "user" not in st.session_state:
@@ -18,18 +36,18 @@ if "role" not in st.session_state:
 
 # Helper functions
 def get_role(uid):
-    user_data = db.child("users").child(uid).get().val()
+    user_data = db.reference("users").child(uid).get()
     return user_data["role"] if user_data else None
 
 def log_audit(action, details):
-    uid = st.session_state.user["localId"]
+    uid = st.session_state.user["uid"] if st.session_state.user else "anonymous"
     audit_data = {
         "action": action,
         "by": uid,
         "timestamp": datetime.now().isoformat(),
-        "details": details
+        "details": json.dumps(details, default=str)  # Ensure serializable
     }
-    db.child("audit").push(audit_data)
+    db.reference("audit").push(audit_data)
 
 # Authentication pages
 def login():
@@ -39,26 +57,28 @@ def login():
     if st.button("Login"):
         try:
             user = auth.sign_in_with_email_and_password(email, password)
-            st.session_state.user = user
+            st.session_state.user = {
+                "uid": user["localId"],
+                "email": user["email"]
+            }
             st.session_state.role = get_role(user["localId"])
             st.success("Logged in successfully!")
-            st.rerun()  # Refresh app
-        except:
-            st.error("Invalid email or password")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Login failed: {str(e)}")
 
 def signup():
     st.subheader("Sign Up")
     email = st.text_input("Email")
     password = st.text_input("Password", type="password")
-    role = st.selectbox("Role", ["user", "admin"])  # For demo; in production, restrict admin creation
+    role = st.selectbox("Role", ["user", "admin"])  # Restrict admin in production
     if st.button("Sign Up"):
         try:
-            user = auth.create_user_with_email_and_password(email, password)
-            uid = user["localId"]
-            db.child("users").child(uid).set({"email": email, "role": role})
+            user = auth.create_user(email=email, password=password)
+            db.reference("users").child(user.uid).set({"email": email, "role": role})
             st.success("Account created! Please log in.")
-        except:
-            st.error("Email already exists or invalid input")
+        except Exception as e:
+            st.error(f"Sign-up failed: {str(e)}")
 
 def logout():
     st.session_state.user = None
@@ -75,7 +95,7 @@ if not st.session_state.user:
         signup()
 else:
     st.sidebar.button("Logout", on_click=logout)
-    uid = st.session_state.user["localId"]
+    uid = st.session_state.user["uid"]
     role = st.session_state.role
     st.title("Tourism Office Payment Record System")
     st.sidebar.title("Menu")
@@ -89,9 +109,9 @@ else:
     ]
 
     # Fetch all payments
-    @st.cache_data(ttl=60)  # Cache for 1 min
+    @st.cache_data(ttl=60)
     def get_payments():
-        payments = db.child("payments").get().val()
+        payments = db.reference("payments").get()
         return payments if payments else {}
 
     payments = get_payments()
@@ -111,7 +131,7 @@ else:
                 "date": date.isoformat(),
                 "added_by": uid
             }
-            new_id = db.child("payments").push(data)["name"]  # Get generated ID
+            new_id = db.reference("payments").push(data).key
             log_audit("add", data)
             st.success("Payment added!")
             st.rerun()
@@ -126,16 +146,15 @@ else:
                 df['type'].str.contains(query, case=False, na=False)
             ]
             if role == "user":
-                filtered = filtered[filtered["added_by"] == uid]  # Users see only their own
+                filtered = filtered[filtered["added_by"] == uid]
             st.dataframe(filtered)
-            # Download as CSV
             csv = filtered.to_csv(index=True)
             st.download_button("Download as CSV", csv, "payments.csv", "text/csv")
 
     elif menu == "Edit Payment":
         st.subheader("Edit Payment")
         if not df.empty:
-            options = {row["payer"] + " - " + row["type"] + " (" + row["date"] + ")": idx for idx, row in df.iterrows()}
+            options = {f"{row['payer']} - {row['type']} ({row['date']})": idx for idx, row in df.iterrows()}
             selected = st.selectbox("Select Payment to Edit", list(options.keys()))
             if selected:
                 pid = options[selected]
@@ -155,7 +174,7 @@ else:
                             "date": date.isoformat(),
                             "added_by": payment["added_by"]
                         }
-                        db.child("payments").child(pid).update(updated_data)
+                        db.reference("payments").child(pid).set(updated_data)
                         log_audit("edit", {"old": payment.to_dict(), "new": updated_data})
                         st.success("Payment updated!")
                         st.rerun()
@@ -166,13 +185,13 @@ else:
         else:
             st.subheader("Delete Payment")
             if not df.empty:
-                options = {row["payer"] + " - " + row["type"] + " (" + row["date"] + ")": idx for idx, row in df.iterrows()}
+                options = {f"{row['payer']} - {row['type']} ({row['date']})": idx for idx, row in df.iterrows()}
                 selected = st.selectbox("Select Payment to Delete", list(options.keys()))
                 if selected:
                     pid = options[selected]
                     if st.button("Delete"):
                         details = df.loc[pid].to_dict()
-                        db.child("payments").child(pid).remove()
+                        db.reference("payments").child(pid).delete()
                         log_audit("delete", details)
                         st.success("Payment deleted!")
                         st.rerun()
@@ -195,14 +214,12 @@ else:
             
             if not filtered.empty:
                 summary = filtered.groupby("type")["amount"].agg(["sum", "count"]).reset_index()
-                summary.loc["Total"] = ["", filtered["amount"].sum(), len(filtered)]
+                summary.loc[len(summary)] = ["Total", filtered["amount"].sum(), len(filtered)]
                 st.table(summary)
                 
-                # Download as CSV
                 csv = summary.to_csv(index=False)
                 st.download_button("Download Report as CSV", csv, f"{report_type.lower()}_report.csv", "text/csv")
                 
-                # Optional: Generate PDF
                 if st.button("Generate PDF Report"):
                     pdf = FPDF()
                     pdf.add_page()
@@ -220,7 +237,7 @@ else:
             st.error("Only admins can view audit trail")
         else:
             st.subheader("Audit Trail")
-            audits = db.child("audit").get().val()
+            audits = db.reference("audit").get()
             if audits:
                 audit_df = pd.DataFrame.from_dict(audits, orient="index")
                 st.dataframe(audit_df)
