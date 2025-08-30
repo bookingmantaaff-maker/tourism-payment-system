@@ -1,27 +1,26 @@
 import streamlit as st
 import firebase_admin
-from firebase_admin import credentials, db, auth
+from firebase_admin import credentials, db
 import pandas as pd
 from datetime import datetime
-from fpdf import FPDF  # For PDF generation (optional)
+from fpdf import FPDF
 import json
+import requests
 
 # Initialize Firebase (only once)
 if not firebase_admin._apps:
-    # Load Firebase credentials from secrets
     firebase_config = st.secrets["firebase"]
-    # Create a service account key JSON for firebase-admin
     cred_dict = {
-        "type": "service_account",
-        "project_id": firebase_config["tourism-payment-sys"],
-        "private_key_id": "your-private-key-id",  # Not needed from secrets.toml
-        "private_key": "your-private-key",        # Not needed from secrets.toml
-        "client_email": "your-client-email",      # Not needed from secrets.toml
-        "client_id": "your-client-id",            # Not needed from secrets.toml
-        "auth_uri": "https://accounts intelligent: accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://accounts.google.com/o/oauth2/token",
-        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-        "client_x509_cert_url": "your-client-cert-url"  # Not needed from secrets.toml
+        "type": firebase_config["type"],
+        "project_id": firebase_config["project_id"],  # Fixed from "tourism-payment-sys"
+        "private_key_id": firebase_config["private_key_id"],
+        "private_key": firebase_config["private_key"],
+        "client_email": firebase_config["client_email"],
+        "client_id": firebase_config["client_id"],
+        "auth_uri": firebase_config["auth_uri"],
+        "token_uri": firebase_config["token_uri"],
+        "auth_provider_x509_cert_url": firebase_config["auth_provider_x509_cert_url"],
+        "client_x509_cert_url": firebase_config["client_x509_cert_url"]
     }
     cred = credentials.Certificate(cred_dict)
     firebase_admin.initialize_app(cred, {
@@ -33,6 +32,8 @@ if "user" not in st.session_state:
     st.session_state.user = None
 if "role" not in st.session_state:
     st.session_state.role = None
+if "id_token" not in st.session_state:
+    st.session_state.id_token = None
 
 # Helper functions
 def get_role(uid):
@@ -45,9 +46,32 @@ def log_audit(action, details):
         "action": action,
         "by": uid,
         "timestamp": datetime.now().isoformat(),
-        "details": json.dumps(details, default=str)  # Ensure serializable
+        "details": json.dumps(details, default=str)
     }
     db.reference("audit").push(audit_data)
+
+def sign_in_with_email_and_password(email, password):
+    """Sign in using Firebase REST API."""
+    api_key = st.secrets["firebase"]["apiKey"]
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
+    payload = {
+        "email": email,
+        "password": password,
+        "returnSecureToken": True
+    }
+    response = requests.post(url, json=payload)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        raise Exception(response.json().get("error", {}).get("message", "Login failed"))
+
+def create_user_with_email_and_password(email, password):
+    """Create user using Firebase Admin SDK."""
+    try:
+        user = firebase_admin.auth.create_user(email=email, password=password)
+        return user
+    except Exception as e:
+        raise Exception(f"Sign-up failed: {str(e)}")
 
 # Authentication pages
 def login():
@@ -56,12 +80,13 @@ def login():
     password = st.text_input("Password", type="password")
     if st.button("Login"):
         try:
-            user = auth.sign_in_with_email_and_password(email, password)
+            user_data = sign_in_with_email_and_password(email, password)
             st.session_state.user = {
-                "uid": user["localId"],
-                "email": user["email"]
+                "uid": user_data["localId"],
+                "email": user_data["email"]
             }
-            st.session_state.role = get_role(user["localId"])
+            st.session_state.id_token = user_data["idToken"]
+            st.session_state.role = get_role(user_data["localId"])
             st.success("Logged in successfully!")
             st.rerun()
         except Exception as e:
@@ -74,7 +99,7 @@ def signup():
     role = st.selectbox("Role", ["user", "admin"])  # Restrict admin in production
     if st.button("Sign Up"):
         try:
-            user = auth.create_user(email=email, password=password)
+            user = create_user_with_email_and_password(email, password)
             db.reference("users").child(user.uid).set({"email": email, "role": role})
             st.success("Account created! Please log in.")
         except Exception as e:
@@ -83,6 +108,7 @@ def signup():
 def logout():
     st.session_state.user = None
     st.session_state.role = None
+    st.session_state.id_token = None
     st.success("Logged out")
     st.rerun()
 

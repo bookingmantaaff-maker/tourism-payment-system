@@ -2,3 +2,4 @@ streamlit==1.38.0
 firebase-admin==6.5.0
 pandas==2.2.3
 fpdf==1.7.2
+requests==2.32.3  # Added for REST API calls
